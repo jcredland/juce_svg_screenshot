@@ -159,7 +159,19 @@ private:
 class UrsaSvgExporter
 {
 public:
+    struct Options
+    {
+        /** Text as editable <text> elements rather than glyph outlines.
+            @see LowLevelGraphicsSVGRenderer::setTextAsText */
+        bool textAsText = false;
+    };
+
     static bool exportComponent(juce::Component& comp, const juce::File& outFile)
+    {
+        return exportComponent(comp, outFile, Options{});
+    }
+
+    static bool exportComponent(juce::Component& comp, const juce::File& outFile, const Options& options)
     {
         const auto w = comp.getWidth();
         const auto h = comp.getHeight();
@@ -169,6 +181,7 @@ public:
         juce::XmlElement svg("svg");
         {
             LowLevelGraphicsSVGRenderer renderer(&svg, w, h);
+            renderer.setTextAsText(options.textAsText);
             juce::Graphics g(renderer);
 
             const UrsaSvgGroupScope groups(comp);

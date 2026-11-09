@@ -27,6 +27,9 @@
 // the module header (ursa_svg_screenshot.h), which provides the juce
 // includes and the enable gate.
 
+#include <unordered_map>
+#include <vector>
+
 // =============================================================================
 /**
     An implementation of juce::LowLevelGraphicsContext that turns the drawing
@@ -44,6 +47,18 @@ public:
         juce::XmlElement* svgDocument,
         int totalWidth,
         int totalHeight);
+
+    /** Writes text as SVG <text> elements instead of glyph outlines, so it
+        stays editable in a design tool. Off by default.
+
+        A run of glyphs is written as text only when every glyph maps back to
+        a character through its typeface's character map and the transform is
+        a plain translate and scale; anything else (ligatures and other shaped
+        substitutions, rotated or sheared text, a horizontally scaled font)
+        falls back to outlines, so the drawing is never wrong. The font is
+        named by family and weight, so the viewer needs it installed.
+    */
+    void setTextAsText(bool shouldWriteTextAsText) { textAsText = shouldWriteTextAsText; }
 
 #pragma mark -
     // =========================================================================
@@ -438,6 +453,30 @@ private:
         const juce::Justification&);
 
     void setClip(const juce::Path&);
+
+#if JUCE_MAJOR_VERSION >= 8
+    /** The text-as-text half of drawGlyphs. Returns false, having written
+        nothing, when the run cannot be written as text.
+    */
+    bool drawGlyphsAsText(
+        juce::Span<const juce::uint16> glyphNumbers,
+        juce::Span<const juce::Point<float>> positions,
+        const juce::AffineTransform&);
+
+    /** The character each glyph of a typeface stands for, built from the
+        typeface's character map the first time the typeface is seen. */
+    const std::unordered_map<juce::uint32, juce::juce_wchar>& getCharactersForGlyphs(const juce::Typeface::Ptr&);
+
+    struct TypefaceCharacters
+    {
+        juce::Typeface::Ptr typeface; // held so the pointer stays a valid key
+        std::unordered_map<juce::uint32, juce::juce_wchar> characters;
+    };
+
+    std::vector<TypefaceCharacters> typefaceCharacters;
+#endif
+
+    bool textAsText = false;
 
 #pragma mark -
     // =========================================================================

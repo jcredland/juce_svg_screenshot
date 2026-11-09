@@ -534,6 +534,9 @@ void LowLevelGraphicsSVGRenderer::drawGlyphs(
     // glyph's position ahead of the caller's transform.
     jassert(glyphNumbers.size() == positions.size());
 
+    if (textAsText && drawGlyphsAsText(glyphNumbers, positions, t))
+        return;
+
     juce::Font& f = state->font;
 
     auto glyphScale = juce::AffineTransform::scale(
@@ -559,6 +562,132 @@ void LowLevelGraphicsSVGRenderer::drawGlyphs(
 
         fillPath(p, juce::AffineTransform());
     }
+}
+
+namespace
+{
+    // Codepoints worth mapping back from glyphs: Latin, its extensions, the
+    // IPA block (the formant filter's vowels), and the punctuation and
+    // symbol blocks that UI text uses - degrees, arrows, maths, dashes.
+    constexpr std::pair<juce::juce_wchar, juce::juce_wchar> mappedCodepointRanges[] = {
+        { 0x0020, 0x02ff },
+        { 0x2000, 0x22ff },
+        { 0x2500, 0x25ff },
+    };
+
+    // CSS font-weight for the style names fonts commonly use, longest first
+    // so "SemiBold" is not read as "Bold".
+    int cssWeightForStyle(const juce::String& style)
+    {
+        static const std::pair<const char*, int> weights[] = {
+            { "ExtraLight", 200 }, { "UltraLight", 200 }, { "SemiBold", 600 }, { "DemiBold", 600 },
+            { "ExtraBold", 800 },  { "UltraBold", 800 },  { "Thin", 100 },     { "Light", 300 },
+            { "Medium", 500 },     { "Bold", 700 },       { "Black", 900 },    { "Heavy", 900 },
+        };
+
+        const auto compact = style.removeCharacters(" -");
+
+        for (const auto& [name, weight] : weights)
+            if (compact.containsIgnoreCase(name))
+                return weight;
+
+        return 400;
+    }
+}
+
+const std::unordered_map<juce::uint32, juce::juce_wchar>&
+    LowLevelGraphicsSVGRenderer::getCharactersForGlyphs(const juce::Typeface::Ptr& typeface)
+{
+    for (const auto& entry : typefaceCharacters)
+        if (entry.typeface == typeface)
+            return entry.characters;
+
+    TypefaceCharacters entry{ typeface, {} };
+
+    for (const auto& [first, last] : mappedCodepointRanges)
+        for (auto codepoint = first; codepoint <= last; ++codepoint)
+            if (const auto glyph = typeface->getNominalGlyphForCodepoint(codepoint))
+                entry.characters.emplace(*glyph, codepoint); // first codepoint wins
+
+    typefaceCharacters.push_back(std::move(entry));
+    return typefaceCharacters.back().characters;
+}
+
+bool LowLevelGraphicsSVGRenderer::drawGlyphsAsText(
+    juce::Span<const juce::uint16> glyphNumbers,
+    juce::Span<const juce::Point<float>> positions,
+    const juce::AffineTransform& t)
+{
+    if (glyphNumbers.empty())
+        return true;
+
+    const juce::Font& f = state->font;
+    const auto typeface = f.getTypefacePtr();
+
+    if (typeface == nullptr)
+        return false;
+
+    // Text is written upright, so only a translate and a uniform scale can be
+    // carried by font-size and positions. A horizontally scaled font would
+    // need a transform on the text, which design tools import unevenly.
+    const auto device = deviceTransform(t);
+    constexpr auto tolerance = 1.0e-3f;
+
+    if (std::abs(device.mat01) > tolerance || std::abs(device.mat10) > tolerance
+        || device.mat00 <= 0.0f || device.mat11 <= 0.0f
+        || std::abs(device.mat00 * f.getHorizontalScale() - device.mat11) > tolerance * device.mat11)
+        return false;
+
+    const auto& characters = getCharactersForGlyphs(typeface);
+
+    juce::String content;
+    juce::Rectangle<float> deviceBounds;
+
+    const auto fontSize = f.getHeight() * typeface->getMetrics(f.getMetricsKind()).heightToPoints * device.mat11;
+    const auto first = positions[0].transformedBy(device);
+
+    for (size_t i = 0; i < glyphNumbers.size(); ++i)
+    {
+        const auto found = characters.find(glyphNumbers[i]);
+
+        if (found == characters.end())
+            return false;
+
+        // One baseline only: a run that steps up or down is not plain text.
+        const auto p = positions[i].transformedBy(device);
+
+        if (std::abs(p.y - first.y) > tolerance)
+            return false;
+
+        content += juce::String::charToString(found->second);
+
+        deviceBounds = deviceBounds.getUnion(juce::Rectangle<float>(p.x, p.y - fontSize, fontSize, fontSize * 1.25f));
+    }
+
+    if (shouldSkipDrawing(deviceBounds))
+        return true;
+
+    auto* text = (state->clipGroup != nullptr ? state->clipGroup : document)->createNewChildElement("text");
+
+    // Only the start is placed and the font spaces the rest, which is what
+    // keeps the text editable as one run. Affinity also drops multi-valued
+    // x lists: per-glyph positions made every run longer than one glyph vanish.
+    text->setAttribute("x", truncateFloat(first.x));
+    text->setAttribute("y", truncateFloat(first.y));
+    text->setAttribute("font-family", typeface->getName());
+    text->setAttribute("font-weight", cssWeightForStyle(typeface->getStyle()));
+
+    if (typeface->getStyle().containsIgnoreCase("Italic") || typeface->getStyle().containsIgnoreCase("Oblique"))
+        text->setAttribute("font-style", "italic");
+
+    text->setAttribute("font-size", truncateFloat(fontSize));
+    text->setAttribute("fill", writeFill());
+    text->setAttribute("fill-opacity", truncateFloat(state->fillType.getOpacity()));
+    text->setAttribute("xml:space", "preserve");
+    text->addTextElement(content);
+
+    applyTags(text);
+    return true;
 }
 #else
 void LowLevelGraphicsSVGRenderer::drawGlyph(int glyphNumber, const juce::AffineTransform& t)
